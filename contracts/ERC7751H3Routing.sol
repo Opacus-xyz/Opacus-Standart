@@ -21,7 +21,8 @@ contract ERC7751H3Routing is IERC7751, OpacusFeeBase {
     // ─── State ────────────────────────────────────────────────────────────────
     address public owner;
     mapping(address => AgentRecord) private _agents;
-    address[] private _agentList;      // for enumeration in discoverAgents
+    address[] private _agentList;             // for enumeration in discoverAgents
+    mapping(address => uint256) private _agentListIndex; // 0-based index in _agentList
 
     // ─── Errors ───────────────────────────────────────────────────────────────
     error NotOwner();
@@ -50,13 +51,12 @@ contract ERC7751H3Routing is IERC7751, OpacusFeeBase {
         if (_agents[msg.sender].active) revert AlreadyRegistered();
         if (gross == 0) revert ZeroAmount();
 
-        uint256 bond;
         uint256 fee;
         if (token == address(0)) {
             if (msg.value != gross) revert EthMismatch();
-            bond = _collectETH(msg.sender, gross);
+            _collectETH(msg.sender, gross);
         } else {
-            bond = _collectERC20(token, msg.sender, gross);
+            _collectERC20(token, msg.sender, gross);
         }
         (fee,) = _splitFee(gross);
 
@@ -74,6 +74,7 @@ contract ERC7751H3Routing is IERC7751, OpacusFeeBase {
             expiresAt:     uint64(block.timestamp + 365 days),
             active:        true
         });
+        _agentListIndex[msg.sender] = _agentList.length;
         _agentList.push(msg.sender);
 
         emit AgentRegistered(msg.sender, h3Index, quicEndpoint, fee);
@@ -101,6 +102,17 @@ contract ERC7751H3Routing is IERC7751, OpacusFeeBase {
         rec.active = false;
         (, uint256 bond) = _splitFee(rec.regFeeGross);
 
+        // Swap-and-pop to keep _agentList compact (O(1) removal)
+        uint256 idx  = _agentListIndex[msg.sender];
+        uint256 last = _agentList.length - 1;
+        if (idx != last) {
+            address lastAddr = _agentList[last];
+            _agentList[idx]          = lastAddr;
+            _agentListIndex[lastAddr] = idx;
+        }
+        _agentList.pop();
+        delete _agentListIndex[msg.sender];
+
         if (rec.token == address(0)) {
             _sendETH(msg.sender, bond);
         } else {
@@ -123,6 +135,7 @@ contract ERC7751H3Routing is IERC7751, OpacusFeeBase {
         for (uint256 i; i < _agentList.length; i++) {
             AgentRecord storage rec = _agents[_agentList[i]];
             if (!rec.active) continue;
+            if (block.timestamp > rec.expiresAt) continue;
             if (rec.kineticScore < minScore) continue;
             bool hasCap;
             for (uint256 j; j < rec.capabilities.length; j++) {
